@@ -35,7 +35,7 @@
 
 - ESP32 晚上會隨逆變器斷電 → 原始 `sensor.sungeryesp32_*` 會變 `unavailable`。報表、utility_meter、MCP 查詢一律使用「保留最後有效值」的 `sensor.solar_{pv,grid,load}_energy_today`，**不要改回讀原始感測器**。
 - 這三個 held 感測器**刻意不在午夜歸零**（避免 ESP32 早上先回報昨日舊值被 utility_meter 重複計入），歸零跟隨來源。
-- 逆變器夜間離線屬正常：告警只在 `sun.sun` 仰角 > 10° 時觸發。
+- 逆變器狀態實體是 `binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm`：`on` = 逆變器告警（全天都要警報）、`off` = 正常、`unavailable` = ESP32 離線（夜間屬正常，只在 `sun.sun` 仰角 > 10° 時警報）。
 - 週 / 月報讀 utility_meter 的 `last_period` 屬性（上一期結算值），不是 state。
 
 ## 電費（`tw_power.jinja`）
@@ -91,6 +91,5 @@
 
 ## 尚待使用者提供（YAML 中標 `TODO`）
 
-- `sensor.inverter_status` → 真實逆變器狀態實體（4 處）
 - `notify.mobile_app_your_phone` → Companion App 通知服務（2 處）
 - 契約種類與容量（瓩）→ 才能做「本期總電費（含基本電費）」

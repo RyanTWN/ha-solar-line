@@ -503,7 +503,7 @@ automation:
           accent: "{{ '#F9A825' if pv >= 0.1 and alerts == 0 else '#E65100' }}"
           note: |-
             {% if pv < 0.1 %}⚠️ 今日幾乎沒有發電，請檢查逆變器或陰雨狀況。
-            {%- elif alerts > 0 %}⚠️ 今日發生 {{ alerts }} 次逆變器通訊中斷。
+            {%- elif alerts > 0 %}⚠️ 今日發生 {{ alerts }} 次逆變器告警 / 通訊中斷。
             {%- else %}✅ 系統運作正常{% endif %}
             {%- set c = 'sensor.electricity_cost_billing_period' %}
             {%- if has_value(c) %}
@@ -562,17 +562,20 @@ automation:
           accent: "#6A1B9A"
           note: "日均發電 {{ (pv / days) | round(1) }} 度"
 
-  # --- 逆變器離線警報 --------------------------------------------------------
-  # ESP32 晚上會隨逆變器斷電，所以只在太陽仰角 > 10° 時告警。
+  # --- 逆變器告警 / 離線警報 ------------------------------------------------
+  # 實體：binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm
+  #   on          → 逆變器回報告警（逆變器在線、有故障）→ 任何時段都告警
+  #   unavailable → ESP32 離線；晚上隨逆變器斷電屬正常 → 只在太陽仰角 > 10° 時告警
+  #   off         → 正常
   # 第二個觸發處理「早上逆變器根本沒上線」的情況（狀態沒變化就不會觸發第一個）。
   - id: solar_inverter_offline
-    alias: "太陽能：逆變器離線警報"
-    description: "白天逆變器中斷連線超過 3 分鐘時發送警報（30 分鐘內不重複）"
+    alias: "太陽能：逆變器告警 / 離線警報"
+    description: "逆變器告警，或白天中斷連線超過 3 分鐘時發送警報（30 分鐘內不重複）"
     mode: single
     triggers:
       - trigger: state
-        entity_id: sensor.inverter_status  # TODO: 換成真實狀態 entity_id
-        to: ["unavailable", "unknown", "fault"]
+        entity_id: binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm
+        to: ["on", "unavailable", "unknown"]
         for:
           minutes: 3
       - trigger: numeric_state
@@ -581,16 +584,17 @@ automation:
         above: 10
         for:
           minutes: 15
+    variables:
+      inv: binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm
+      inv_state: "{{ states(inv) }}"
+      is_alarm: "{{ inv_state == 'on' }}"
     conditions:
-      - condition: numeric_state
-        entity_id: sun.sun
-        attribute: elevation
-        above: 10
       - condition: state
-        entity_id: sensor.inverter_status  # TODO: 同上
-        state: ["unavailable", "unknown", "fault"]
+        entity_id: binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm
+        state: ["on", "unavailable", "unknown"]
         for:
           minutes: 3
+      - "{{ is_alarm or state_attr('sun.sun', 'elevation') | float(0) > 10 }}"
       - >-
         {{ this.attributes.last_triggered is none
            or now() - this.attributes.last_triggered > timedelta(minutes=30) }}
@@ -604,11 +608,14 @@ automation:
       - action: script.solar_notify
         data:
           priority: critical
-          title: "🚨【警報】太陽能逆變器通訊中斷！"
+          title: >-
+            {{ '🚨【警報】太陽能逆變器回報告警！' if is_alarm
+               else '🚨【警報】太陽能逆變器通訊中斷！' }}
           message: |-
-            目前狀態：{{ states('sensor.inverter_status') }}
-            中斷時間：{{ as_local(states.sensor.inverter_status.last_changed).strftime('%H:%M:%S') }}
-            請檢查逆變器通訊模組、網路或斷路器狀態。
+            目前狀態：{{ {'on': '告警中', 'unavailable': '離線（無法連線）', 'unknown': '未知'}.get(inv_state, inv_state) }}
+            發生時間：{{ as_local(states[inv].last_changed).strftime('%H:%M:%S') }}
+            {{ '請查看逆變器面板上的告警代碼，必要時聯絡安裝商。' if is_alarm
+               else '請檢查逆變器、ESP32 通訊模組、網路或斷路器狀態。' }}
 
   # --- 逆變器恢復通知 --------------------------------------------------------
   - id: solar_inverter_recovered
@@ -616,9 +623,9 @@ automation:
     mode: single
     triggers:
       - trigger: state
-        entity_id: sensor.inverter_status  # TODO: 同上
-        from: ["unavailable", "unknown", "fault"]
-        not_to: ["unavailable", "unknown", "fault"]
+        entity_id: binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm
+        from: ["on", "unavailable", "unknown"]
+        to: "off"
         for:
           minutes: 1
     conditions:
@@ -631,10 +638,12 @@ automation:
           entity_id: input_boolean.solar_inverter_alert_active
       - action: script.solar_notify
         data:
-          title: "✅ 太陽能逆變器已恢復連線"
+          title: >-
+            {{ '✅ 太陽能逆變器告警已解除' if trigger.from_state.state == 'on'
+               else '✅ 太陽能逆變器已恢復連線' }}
           message: |-
-            目前狀態：{{ trigger.to_state.state }}
-            離線約 {{ ((trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds() / 60) | round(0) | int }} 分鐘
+            目前狀態：正常
+            異常持續約 {{ ((trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds() / 60) | round(0) | int }} 分鐘
 
   # --- LINE 額度偏低提醒（只走 App，不再消耗 LINE） --------------------------
   - id: line_quota_low

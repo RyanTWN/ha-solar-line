@@ -18,6 +18,7 @@
 | v1 | `rest_command.line_push` + 18:30 文字日報 + 逆變器離線警報（設定寫在 `configuration.yaml` / `automations.yaml`） |
 | v2 | 改為單一 package；以下修正與 A–D 功能 |
 | v2.1 | E. 電費估算（農業灌溉電錶、低壓電力非時間電價、每月抄表） |
+| v2.2 | 逆變器狀態改用 `binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm`：區分「告警（on）」與「離線（unavailable）」，分別發送不同警報與恢復通知 |
 
 ### v2 / v2.1 變更明細
 
@@ -51,7 +52,6 @@ secrets.example.yaml       # secrets.yaml 需要新增的兩個 key
    - `automations.yaml`（或 UI）中舊的「每日日報」與「逆變器離線警報」
 4. `secrets.yaml` 加入 `line_bearer`、`line_admin_user_id`（見 `secrets.example.yaml`）。
 5. 搜尋 `TODO` 替換：
-   - `sensor.inverter_status` → 真實的逆變器狀態實體（4 處）
    - `notify.mobile_app_your_phone` → 你的 Companion App 通知服務（2 處，開發者工具 → 動作 搜尋 `notify.mobile_app_` 即可看到）
    - 計費期已設為每月 11 日歸零（每月 10–12 日抄表），一般不需再改
 6. 開發者工具 → YAML → 「檢查設定」→ 重新啟動。
@@ -89,7 +89,7 @@ data:
 | `sensor.solar_savings_billing_period` | 本期累計省下電費 |
 | `sensor.solar_savings_{daily,weekly,monthly}` | 日 / 週 / 月省下電費 |
 | `sensor.line_push_quota_used` / `_limit` / `_remaining` | LINE 推播額度 |
-| `counter.solar_offline_alerts_today` | 今日斷線次數（日報引用） |
+| `counter.solar_offline_alerts_today` | 今日逆變器告警 / 斷線次數（日報引用） |
 | `input_boolean.solar_inverter_alert_active` | 告警中旗標（恢復通知用） |
 | `input_boolean.solar_weekly_report_enabled` | 週報開關 |
 
@@ -212,5 +212,5 @@ SSE 版本把 `transport` 改成 `"sse"`、`url` 改成 `/mcp_server/sse`。啟�
 | 數值顯示冗長小數 | 浮點數未修約 | `\| float(0) \| round(1)` |
 | 多行文字導致推播無反應 | 換行未跳脫，JSON 破裂 | payload 使用 `\| to_json` |
 | 傍晚日報讀到 0 / 自給率接近 0（v2 修正） | ESP32 隨逆變器斷電變 `unavailable`；`solar_ratio` 為即時值 | 「保留最後有效值」template 感測器；自給率改用全日能量計算 |
-| 每晚誤報逆變器離線（v2 修正） | 逆變器夜間休眠屬正常 | 僅在太陽仰角 > 10° 時告警 |
+| 每晚誤報逆變器離線（v2 修正） | 逆變器夜間休眠屬正常 | 離線（`unavailable`）僅在太陽仰角 > 10° 時告警；逆變器回報告警（`on`）則全天告警 |
 | 電費以住宅累進計算錯誤（v2.1 修正） | 泉海閑居為農業灌溉電錶（低壓電力），非表燈累進 | `tw_power.jinja` 改單一費率：夏月 2.45 / 非夏月 2.35 元/度 |
