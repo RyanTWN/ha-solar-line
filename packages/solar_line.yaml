@@ -1,0 +1,665 @@
+###############################################################################
+# 太陽能監控 × LINE 推播 Package
+#
+# 啟用方式（configuration.yaml）：
+#   homeassistant:
+#     packages: !include_dir_named packages
+#
+# 啟用前請先：
+#   1. 從 configuration.yaml 移除舊的 rest_command.line_push（否則 key 重複會報錯）
+#   2. 從 automations.yaml 刪除舊的「每日日報」「逆變器離線警報」兩個自動化
+#   3. 在 secrets.yaml 加入 line_bearer / line_admin_user_id（見 secrets.example.yaml）
+#   4. 搜尋本檔 "TODO" 替換成你的實體名稱
+#
+# 自建實體一律使用英文名稱，entity_id 才可預測（顯示名稱可在 UI 改成中文）。
+###############################################################################
+
+###############################################################################
+# 1. LINE Messaging API
+###############################################################################
+rest_command:
+  # 不建議直接呼叫，請改用 script.solar_notify（會處理額度與備援）。
+  # 參數：to（必填）、messages（LINE message 物件陣列）或 message（純文字）
+  line_push:
+    url: "https://api.line.me/v2/bot/message/push"
+    method: POST
+    headers:
+      Authorization: !secret line_bearer
+      Content-Type: "application/json; charset=UTF-8"
+    payload: >-
+      {% set msgs = messages if messages is defined
+         else [{'type': 'text', 'text': message}] %}
+      {% if msgs is string %}{% set msgs = msgs | from_json %}{% endif %}
+      {{ {'to': to, 'messages': msgs} | to_json }}
+
+rest:
+  # 本月已使用的 Push 則數（Reply 不計入）
+  - resource: "https://api.line.me/v2/bot/message/quota/consumption"
+    headers:
+      Authorization: !secret line_bearer
+    scan_interval: 1800
+    sensor:
+      - name: "LINE Push Quota Used"
+        unique_id: line_push_quota_used
+        icon: mdi:message-arrow-right
+        unit_of_measurement: "則"
+        state_class: measurement
+        value_template: "{{ value_json.totalUsage }}"
+
+  # 每月上限（免費方案 200）
+  - resource: "https://api.line.me/v2/bot/message/quota"
+    headers:
+      Authorization: !secret line_bearer
+    scan_interval: 21600
+    sensor:
+      - name: "LINE Push Quota Limit"
+        unique_id: line_push_quota_limit
+        icon: mdi:message-lock
+        unit_of_measurement: "則"
+        value_template: >-
+          {{ value_json.value if value_json.type == 'limited' else 999999 }}
+
+###############################################################################
+# 2. 輔助實體
+###############################################################################
+counter:
+  solar_offline_alerts_today:
+    name: "Solar Offline Alerts Today"
+    icon: mdi:alert-circle-outline
+    step: 1
+
+input_boolean:
+  solar_inverter_alert_active:
+    name: "Solar Inverter Alert Active"
+    icon: mdi:solar-power-variant-outline
+  solar_weekly_report_enabled:
+    name: "Solar Weekly Report Enabled"
+    icon: mdi:calendar-week
+
+###############################################################################
+# 3. Template 感測器
+###############################################################################
+template:
+  # --- 「保持最後有效值」的今日能量 -----------------------------------------
+  # ESP32 晚上隨逆變器斷電，原始感測器會變 unavailable，日報與 utility_meter
+  # 讀到的會是 0 或中斷。這裡只在來源是數字時才更新，否則沿用上一次的值。
+  # 歸零完全跟隨來源（逆變器自己的每日歸零），不在午夜強制歸零，
+  # 以免 ESP32 早上上線先回報昨日舊值時被 utility_meter 重複計入。
+  - triggers:
+      - trigger: state
+        entity_id: sensor.sungeryesp32_jin_ri_pvfa_dian_liang_pv_energy_today
+        id: pv
+      - trigger: state
+        entity_id: sensor.sungeryesp32_jin_ri_fu_zai_shi_dian_yong_dian_liang_load_grid_today
+        id: grid
+      - trigger: state
+        entity_id: sensor.sungeryesp32_jin_ri_fu_zai_yong_dian_liang_load_energy_today
+        id: load
+    sensor:
+      - name: "Solar PV Energy Today"
+        unique_id: solar_pv_energy_today_held
+        device_class: energy
+        state_class: total_increasing
+        unit_of_measurement: kWh
+        state: >-
+          {% if trigger.id == 'pv' and is_number(trigger.to_state.state) %}
+            {{ trigger.to_state.state | float }}
+          {% elif is_number(this.state) %}
+            {{ this.state }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+      - name: "Solar Grid Energy Today"
+        unique_id: solar_grid_energy_today_held
+        device_class: energy
+        state_class: total_increasing
+        unit_of_measurement: kWh
+        state: >-
+          {% if trigger.id == 'grid' and is_number(trigger.to_state.state) %}
+            {{ trigger.to_state.state | float }}
+          {% elif is_number(this.state) %}
+            {{ this.state }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+      - name: "Solar Load Energy Today"
+        unique_id: solar_load_energy_today_held
+        device_class: energy
+        state_class: total_increasing
+        unit_of_measurement: kWh
+        state: >-
+          {% if trigger.id == 'load' and is_number(trigger.to_state.state) %}
+            {{ trigger.to_state.state | float }}
+          {% elif is_number(this.state) %}
+            {{ this.state }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+
+  - sensor:
+      # 全日綠能自給率 =（總耗電 − 電網取電）/ 總耗電
+      # 取代原本的 solar_ratio（可能是即時值，傍晚讀會接近 0）
+      - name: "Solar Self Sufficiency Today"
+        unique_id: solar_self_sufficiency_today
+        icon: mdi:leaf
+        unit_of_measurement: "%"
+        state_class: measurement
+        availability: "{{ has_value('sensor.solar_load_energy_today') }}"
+        state: >-
+          {% set load = states('sensor.solar_load_energy_today') | float(0) %}
+          {% set grid = states('sensor.solar_grid_energy_today') | float(0) %}
+          {{ ([0, (load - grid) / load * 100] | max) | round(1) if load > 0 else 0 }}
+
+      # --- 電費（流動電費，方案與費率見 custom_templates/tw_power.jinja） ---
+      # 只算依度數計收的部分，不含基本電費、補貼與減免。
+      # 跨夏月 / 非夏月的計費期，台電按天數比例分攤；這裡以「當下月份」的費率
+      # 計算整期，換季那一期會有些微誤差。
+      - name: "Electricity Cost Billing Period"
+        unique_id: electricity_cost_billing_period
+        icon: mdi:cash-multiple
+        unit_of_measurement: "TWD"
+        availability: "{{ has_value('sensor.solar_grid_billing') }}"
+        state: >-
+          {% from 'tw_power.jinja' import tw_cost %}
+          {{ tw_cost(states('sensor.solar_grid_billing')) }}
+        attributes:
+          grid_kwh: "{{ states('sensor.solar_grid_billing') | float(0) | round(1) }}"
+          plan: >-
+            {% from 'tw_power.jinja' import tw_plan %}
+            {{ tw_plan() }}
+          tier: >-
+            {% from 'tw_power.jinja' import tw_tier %}
+            {{ tw_tier(states('sensor.solar_grid_billing')).split(',')[0] | int }}
+          marginal_rate: >-
+            {% from 'tw_power.jinja' import tw_tier %}
+            {{ tw_tier(states('sensor.solar_grid_billing')).split(',')[1] | float }}
+
+      # 若沒有太陽能，本期電費會是多少（總耗電全部向台電購買）
+      - name: "Electricity Cost Without Solar Billing Period"
+        unique_id: electricity_cost_without_solar_billing_period
+        icon: mdi:cash-remove
+        unit_of_measurement: "TWD"
+        availability: "{{ has_value('sensor.solar_load_billing') }}"
+        state: >-
+          {% from 'tw_power.jinja' import tw_cost %}
+          {{ tw_cost(states('sensor.solar_load_billing')) }}
+
+      # 本期累計省下的電費；自用的太陽能永遠抵掉最貴的級距，所以值只增不減
+      # （計費期歸零、或換季費率改變時會下降，utility_meter 會視為歸零處理）
+      - name: "Solar Savings Billing Period"
+        unique_id: solar_savings_billing_period
+        icon: mdi:piggy-bank-outline
+        unit_of_measurement: "TWD"
+        state_class: total_increasing
+        availability: >-
+          {{ has_value('sensor.solar_load_billing') and has_value('sensor.solar_grid_billing') }}
+        state: >-
+          {% from 'tw_power.jinja' import tw_cost %}
+          {{ ([0, tw_cost(states('sensor.solar_load_billing')) | float
+                 - tw_cost(states('sensor.solar_grid_billing')) | float] | max) | round(1) }}
+
+      - name: "LINE Push Quota Remaining"
+        unique_id: line_push_quota_remaining
+        icon: mdi:message-badge-outline
+        unit_of_measurement: "則"
+        availability: "{{ has_value('sensor.line_push_quota_used') }}"
+        state: >-
+          {% set limit = states('sensor.line_push_quota_limit') | int(200) %}
+          {% set used = states('sensor.line_push_quota_used') | int(0) %}
+          {{ [limit - used, 0] | max }}
+
+###############################################################################
+# 4. 週 / 月累計
+###############################################################################
+# 上一期的結算值在各實體的 last_period 屬性
+utility_meter:
+  solar_pv_weekly:
+    source: sensor.solar_pv_energy_today
+    cycle: weekly
+  solar_grid_weekly:
+    source: sensor.solar_grid_energy_today
+    cycle: weekly
+  solar_load_weekly:
+    source: sensor.solar_load_energy_today
+    cycle: weekly
+  solar_pv_monthly:
+    source: sensor.solar_pv_energy_today
+    cycle: monthly
+  solar_grid_monthly:
+    source: sensor.solar_grid_energy_today
+    cycle: monthly
+  solar_load_monthly:
+    source: sensor.solar_load_energy_today
+    cycle: monthly
+
+  # --- 台電計費期（抄表日） ----------------------------------------------------
+  # 泉海閑居（農業灌溉電錶）：每月 10–12 日抄表，以 11 日 00:00 歸零近似。
+  # 改為雙月抄表時，例："0 0 12 2,4,6,8,10,12 *"，並把 tw_power.jinja 的 BIMONTHLY 改 true。
+  solar_grid_billing:
+    source: sensor.solar_grid_energy_today
+    cron: "0 0 11 * *"  # 每月 10–12 日抄表，取中間 11 日
+  solar_load_billing:
+    source: sensor.solar_load_energy_today
+    cron: "0 0 11 * *"  # 每月 10–12 日抄表，取中間 11 日
+
+  # --- 省下電費：日 / 週 / 月 -------------------------------------------------
+  solar_savings_daily:
+    source: sensor.solar_savings_billing_period
+    cycle: daily
+  solar_savings_weekly:
+    source: sensor.solar_savings_billing_period
+    cycle: weekly
+  solar_savings_monthly:
+    source: sensor.solar_savings_billing_period
+    cycle: monthly
+
+###############################################################################
+# 5. Scripts
+###############################################################################
+script:
+  # --- 統一推播入口 -----------------------------------------------------------
+  # priority:
+  #   normal   — 走 LINE；剩餘額度 <= line_reserve 或 LINE 失敗時改走手機 App
+  #   critical — LINE 還有額度就發（可動用保留額度），且一定同時發手機 App 高優先通知
+  solar_notify:
+    alias: "太陽能：統一推播"
+    mode: queued
+    max: 10
+    fields:
+      title:
+        description: "標題（純文字時置於第一行；Flex 時作為 altText）"
+        example: "📊 太陽能日報"
+      message:
+        description: "純文字內容（Flex 時作為手機 App 備援內容）"
+        required: true
+        example: "今日發電 12.3 度"
+      flex:
+        description: "（選填）LINE Flex Message 的 contents（bubble/carousel 物件）"
+      priority:
+        description: "normal / critical"
+        default: normal
+        selector:
+          select:
+            options: [normal, critical]
+    variables:
+      line_to: !secret line_admin_user_id
+      mobile_notify: notify.mobile_app_your_phone  # TODO: 換成你的 Companion App 通知服務
+      line_reserve: 20  # 保留給緊急警報的 LINE 額度
+      prio: "{{ priority | default('normal') }}"
+      remaining: "{{ states('sensor.line_push_quota_remaining') | int(200) }}"
+      use_line: "{{ remaining > (0 if prio == 'critical' else line_reserve) }}"
+      heading: "{{ title | default('') }}"
+      full_text: "{{ (heading ~ '\n' if heading else '') ~ message }}"
+      line_messages: >-
+        {% if flex is defined and flex %}
+          {{ [{'type': 'flex', 'altText': (heading or message)[:400], 'contents': flex}] | to_json }}
+        {% else %}
+          {{ [{'type': 'text', 'text': full_text[:5000]}] | to_json }}
+        {% endif %}
+    sequence:
+      - if: "{{ use_line }}"
+        then:
+          - action: rest_command.line_push
+            continue_on_error: true
+            response_variable: line_resp
+            data:
+              to: "{{ line_to }}"
+              messages: "{{ line_messages }}"
+          - if: "{{ line_resp is not defined or line_resp.status | default(0) != 200 }}"
+            then:
+              - if: "{{ prio != 'critical' }}"  # critical 下面本來就會發
+                then:
+                  - action: "{{ mobile_notify }}"
+                    data:
+                      title: "{{ heading or '太陽能通知' }}"
+                      message: >-
+                        {{ message }}
+
+                        （LINE 推播失敗，HTTP {{ line_resp.status | default('error') if line_resp is defined else 'error' }}）
+            else:
+              - action: homeassistant.update_entity
+                continue_on_error: true
+                target:
+                  entity_id: sensor.line_push_quota_used
+        else:
+          - if: "{{ prio != 'critical' }}"
+            then:
+              - action: "{{ mobile_notify }}"
+                data:
+                  title: "{{ heading or '太陽能通知' }}"
+                  message: >-
+                    {{ message }}
+
+                    （LINE 額度剩 {{ remaining }} 則，改由 App 通知）
+      - if: "{{ prio == 'critical' }}"
+        then:
+          - action: "{{ mobile_notify }}"
+            data:
+              title: "{{ heading or '🚨 太陽能警報' }}"
+              message: "{{ message }}"
+              data:
+                ttl: 0              # Android：立即送達
+                priority: high
+                channel: solar_alert
+                push:               # iOS：關鍵警示（勿擾模式也會響）
+                  sound:
+                    name: default
+                    critical: 1
+                    volume: 0.8
+
+  # --- 報表卡片（日 / 週 / 月共用） -----------------------------------------
+  solar_send_report:
+    alias: "太陽能：發送報表卡片"
+    mode: queued
+    fields:
+      title:
+        required: true
+        example: "📊 太陽能每日日報"
+      period:
+        required: true
+        example: "2026-10-19"
+      pv:
+        required: true
+        example: 12.3
+      grid:
+        required: true
+        example: 4.5
+      load:
+        required: true
+        example: 10.2
+      saved:
+        description: "（選填）省下的電費（元），有值才顯示該列"
+        example: 38.5
+      note:
+        description: "卡片底部的狀態 / 備註文字"
+        example: "✅ 系統運作正常"
+      accent:
+        description: "標題列底色"
+        default: "#F9A825"
+    variables:
+      pv_v: "{{ pv | float(0) | round(1) }}"
+      grid_v: "{{ grid | float(0) | round(1) }}"
+      load_v: "{{ load | float(0) | round(1) }}"
+      ratio: "{{ ([0, (load_v - grid_v) / load_v * 100] | max) | round(1) if load_v > 0 else 0 }}"
+      bar: "{{ [[ratio, 1] | max, 100] | min }}"
+      note_text: "{{ note | default('') }}"
+      has_saved: "{{ saved is defined and is_number(saved) }}"
+      saved_v: "{{ saved | float(0) | round(0) | int if has_saved else 0 }}"
+      plain: |-
+        {{ period }}
+        ☀️ 發電量：{{ pv_v }} 度
+        🔌 電網取電：{{ grid_v }} 度
+        ⚡ 總耗電量：{{ load_v }} 度
+        🌱 綠能自給率：{{ ratio }} %
+        {% if has_saved %}💰 省下電費：約 NT${{ saved_v }}
+        {% endif %}{{ note_text }}
+      saved_rows:
+        - { type: separator }
+        - type: box
+          layout: horizontal
+          contents:
+            - { type: text, text: "💰 省下電費", size: sm, color: "#555555" }
+            - { type: text, text: "約 NT${{ saved_v }}", size: md, align: end, weight: bold, color: "#F57C00" }
+      bubble:
+        type: bubble
+        size: kilo
+        header:
+          type: box
+          layout: vertical
+          backgroundColor: "{{ accent | default('#F9A825') }}"
+          paddingAll: 16px
+          contents:
+            - type: text
+              text: "{{ title }}"
+              weight: bold
+              size: lg
+              color: "#FFFFFF"
+            - type: text
+              text: "{{ period }}"
+              size: sm
+              color: "#FFFFFFDD"
+        body:
+          type: box
+          layout: vertical
+          spacing: md
+          paddingAll: 16px
+          contents:
+            - type: box
+              layout: horizontal
+              contents:
+                - { type: text, text: "☀️ 發電量", size: sm, color: "#555555" }
+                - { type: text, text: "{{ pv_v }} 度", size: sm, align: end, weight: bold }
+            - type: box
+              layout: horizontal
+              contents:
+                - { type: text, text: "🔌 電網取電", size: sm, color: "#555555" }
+                - { type: text, text: "{{ grid_v }} 度", size: sm, align: end, weight: bold }
+            - type: box
+              layout: horizontal
+              contents:
+                - { type: text, text: "⚡ 總耗電量", size: sm, color: "#555555" }
+                - { type: text, text: "{{ load_v }} 度", size: sm, align: end, weight: bold }
+            - { type: separator }
+            - type: box
+              layout: horizontal
+              contents:
+                - { type: text, text: "🌱 綠能自給率", size: sm, color: "#555555" }
+                - { type: text, text: "{{ ratio }} %", size: md, align: end, weight: bold, color: "#2E7D32" }
+            - type: box
+              layout: vertical
+              height: 8px
+              cornerRadius: 4px
+              backgroundColor: "#E0E0E0"
+              contents:
+                - type: box
+                  layout: vertical
+                  width: "{{ bar }}%"
+                  height: 8px
+                  cornerRadius: 4px
+                  backgroundColor: "#43A047"
+                  contents: []
+      body_tail:
+        - { type: separator }
+        - type: text
+          text: "{{ note_text if note_text else ' ' }}"
+          size: xs
+          color: "#888888"
+          wrap: true
+      body_contents: >-
+        {{ bubble.body.contents + (saved_rows if has_saved else []) + body_tail }}
+    sequence:
+      - action: script.solar_notify
+        data:
+          title: "{{ title }}"
+          message: "{{ plain }}"
+          flex: "{{ dict(bubble, body=dict(bubble.body, contents=body_contents)) }}"
+          priority: normal
+
+###############################################################################
+# 6. Automations
+###############################################################################
+automation:
+  # --- 每日日報：日落後 30 分鐘 ---------------------------------------------
+  - id: solar_daily_report
+    alias: "太陽能：每日用電與發電日報"
+    description: "日落後 30 分鐘彙整本日發電、電網取電、總用電量與自給率"
+    mode: single
+    triggers:
+      - trigger: sun
+        event: sunset
+        offset: "00:30:00"
+    variables:
+      pv: "{{ states('sensor.solar_pv_energy_today') | float(0) }}"
+      alerts: "{{ states('counter.solar_offline_alerts_today') | int(0) }}"
+    actions:
+      - action: script.solar_send_report
+        data:
+          title: "📊 太陽能每日日報"
+          period: "📅 {{ now().strftime('%Y-%m-%d') }}"
+          pv: "{{ pv }}"
+          grid: "{{ states('sensor.solar_grid_energy_today') | float(0) }}"
+          load: "{{ states('sensor.solar_load_energy_today') | float(0) }}"
+          saved: "{{ states('sensor.solar_savings_daily') | float(0) }}"
+          accent: "{{ '#F9A825' if pv >= 0.1 and alerts == 0 else '#E65100' }}"
+          note: |-
+            {% if pv < 0.1 %}⚠️ 今日幾乎沒有發電，請檢查逆變器或陰雨狀況。
+            {%- elif alerts > 0 %}⚠️ 今日發生 {{ alerts }} 次逆變器通訊中斷。
+            {%- else %}✅ 系統運作正常{% endif %}
+            {%- set c = 'sensor.electricity_cost_billing_period' %}
+            {%- if has_value(c) %}
+            🧾 本期已用 {{ state_attr(c, 'grid_kwh') }} 度，{{ '第 %s 級' | format(state_attr(c, 'tier')) if state_attr(c, 'plan') == 'tiered' else '單價' }}（{{ state_attr(c, 'marginal_rate') }} 元/度），流動電費約 NT${{ states(c) | float(0) | round(0) | int }}，累計省 NT${{ states('sensor.solar_savings_billing_period') | float(0) | round(0) | int }}
+            {%- endif %}
+
+  # --- 週報：每週一 08:00（可用 input_boolean 關閉） -------------------------
+  - id: solar_weekly_report
+    alias: "太陽能：上週結算週報"
+    mode: single
+    triggers:
+      - trigger: time
+        at: "08:00:00"
+    conditions:
+      - "{{ now().weekday() == 0 }}"
+      - condition: state
+        entity_id: input_boolean.solar_weekly_report_enabled
+        state: "on"
+    variables:
+      pv: "{{ state_attr('sensor.solar_pv_weekly', 'last_period') | float(0) }}"
+    actions:
+      - action: script.solar_send_report
+        data:
+          title: "📈 太陽能週報"
+          period: >-
+            📅 {{ (now() - timedelta(days=7)).strftime('%m/%d') }} ~
+            {{ (now() - timedelta(days=1)).strftime('%m/%d') }}
+          pv: "{{ pv }}"
+          grid: "{{ state_attr('sensor.solar_grid_weekly', 'last_period') | float(0) }}"
+          load: "{{ state_attr('sensor.solar_load_weekly', 'last_period') | float(0) }}"
+          saved: "{{ state_attr('sensor.solar_savings_weekly', 'last_period') | float(0) }}"
+          accent: "#1E88E5"
+          note: "日均發電 {{ (pv / 7) | round(1) }} 度"
+
+  # --- 月報：每月 1 日 08:00 -------------------------------------------------
+  - id: solar_monthly_report
+    alias: "太陽能：上月結算月報"
+    mode: single
+    triggers:
+      - trigger: time
+        at: "08:00:00"
+    conditions:
+      - "{{ now().day == 1 }}"
+    variables:
+      days: "{{ (now().replace(day=1) - timedelta(days=1)).day }}"
+      pv: "{{ state_attr('sensor.solar_pv_monthly', 'last_period') | float(0) }}"
+    actions:
+      - action: script.solar_send_report
+        data:
+          title: "🗓️ 太陽能月報"
+          period: "📅 {{ (now().replace(day=1) - timedelta(days=1)).strftime('%Y 年 %m 月') }}"
+          pv: "{{ pv }}"
+          grid: "{{ state_attr('sensor.solar_grid_monthly', 'last_period') | float(0) }}"
+          load: "{{ state_attr('sensor.solar_load_monthly', 'last_period') | float(0) }}"
+          saved: "{{ state_attr('sensor.solar_savings_monthly', 'last_period') | float(0) }}"
+          accent: "#6A1B9A"
+          note: "日均發電 {{ (pv / days) | round(1) }} 度"
+
+  # --- 逆變器離線警報 --------------------------------------------------------
+  # ESP32 晚上會隨逆變器斷電，所以只在太陽仰角 > 10° 時告警。
+  # 第二個觸發處理「早上逆變器根本沒上線」的情況（狀態沒變化就不會觸發第一個）。
+  - id: solar_inverter_offline
+    alias: "太陽能：逆變器離線警報"
+    description: "白天逆變器中斷連線超過 3 分鐘時發送警報（30 分鐘內不重複）"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.inverter_status  # TODO: 換成真實狀態 entity_id
+        to: ["unavailable", "unknown", "fault"]
+        for:
+          minutes: 3
+      - trigger: numeric_state
+        entity_id: sun.sun
+        attribute: elevation
+        above: 10
+        for:
+          minutes: 15
+    conditions:
+      - condition: numeric_state
+        entity_id: sun.sun
+        attribute: elevation
+        above: 10
+      - condition: state
+        entity_id: sensor.inverter_status  # TODO: 同上
+        state: ["unavailable", "unknown", "fault"]
+        for:
+          minutes: 3
+      - >-
+        {{ this.attributes.last_triggered is none
+           or now() - this.attributes.last_triggered > timedelta(minutes=30) }}
+    actions:
+      - action: counter.increment
+        target:
+          entity_id: counter.solar_offline_alerts_today
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.solar_inverter_alert_active
+      - action: script.solar_notify
+        data:
+          priority: critical
+          title: "🚨【警報】太陽能逆變器通訊中斷！"
+          message: |-
+            目前狀態：{{ states('sensor.inverter_status') }}
+            中斷時間：{{ as_local(states.sensor.inverter_status.last_changed).strftime('%H:%M:%S') }}
+            請檢查逆變器通訊模組、網路或斷路器狀態。
+
+  # --- 逆變器恢復通知 --------------------------------------------------------
+  - id: solar_inverter_recovered
+    alias: "太陽能：逆變器恢復通知"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.inverter_status  # TODO: 同上
+        from: ["unavailable", "unknown", "fault"]
+        not_to: ["unavailable", "unknown", "fault"]
+        for:
+          minutes: 1
+    conditions:
+      - condition: state
+        entity_id: input_boolean.solar_inverter_alert_active
+        state: "on"
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.solar_inverter_alert_active
+      - action: script.solar_notify
+        data:
+          title: "✅ 太陽能逆變器已恢復連線"
+          message: |-
+            目前狀態：{{ trigger.to_state.state }}
+            離線約 {{ ((trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds() / 60) | round(0) | int }} 分鐘
+
+  # --- LINE 額度偏低提醒（只走 App，不再消耗 LINE） --------------------------
+  - id: line_quota_low
+    alias: "LINE：推播額度偏低提醒"
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.line_push_quota_remaining
+        below: 21
+    actions:
+      - action: notify.mobile_app_your_phone  # TODO: 同 solar_notify 的 mobile_notify
+        data:
+          title: "⚠️ LINE 推播額度偏低"
+          message: >-
+            本月剩 {{ states('sensor.line_push_quota_remaining') }} 則，
+            一般通知將改由 App 發送，LINE 額度保留給緊急警報。
+
+  # --- 每日午夜重置告警計數 --------------------------------------------------
+  - id: solar_daily_counter_reset
+    alias: "太陽能：每日重置告警計數"
+    mode: single
+    triggers:
+      - trigger: time
+        at: "00:00:00"
+    actions:
+      - action: counter.reset
+        target:
+          entity_id: counter.solar_offline_alerts_today

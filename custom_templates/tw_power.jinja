@@ -1,0 +1,75 @@
+{#-
+  台電電費計算 macro
+  放到 /config/custom_templates/，修改後執行 homeassistant.reload_custom_templates
+
+  用法：
+    {% from 'tw_power.jinja' import tw_cost, tw_tier, tw_plan %}
+    {{ tw_cost(350) }}        → 本期用 350 度的流動電費（元）
+    {{ tw_tier(350) }}        → "級數,每度單價"，例如 "3,3.70"；單一費率時級數固定為 1
+    {{ tw_plan() }}           → 'flat' 或 'tiered'
+
+  只計算「流動電費」（依度數計收的部分），不含基本電費、補貼與減免。
+-#}
+
+{#- ===== 電價方案 ===== -#}
+{#- 'flat'  ：單一費率（電力 / 農業動力用電：每度一個價，分夏月 / 非夏月）
+    'tiered'：表燈非時間累進（住宅） -#}
+{%- set PLAN = 'flat' -%}
+
+{#- 單一費率（元/度）：台電「低壓電力・非時間電價」流動電費
+    夏月 6/1–9/30：2.45；非夏月：2.35 -#}
+{%- set FLAT_SUMMER = 2.45 -%}
+{%- set FLAT_OTHER = 2.35 -%}
+
+{#- 表燈累進費率（2024-04-01 起），PLAN='tiered' 時才使用 -#}
+{%- set BOUNDS = [120, 330, 500, 700, 1000] -%}
+{%- set RATES_SUMMER = [1.68, 2.45, 3.70, 5.04, 6.24, 8.46] -%}
+{%- set RATES_OTHER  = [1.68, 2.16, 3.03, 4.14, 5.07, 6.63] -%}
+
+{%- set SUMMER_MONTHS = [6, 7, 8, 9] -%}
+{%- set BIMONTHLY = false -%}  {#- 每月抄表；雙月抄表改 true（累進級距乘 2） -#}
+
+{%- macro tw_plan() -%}{{ PLAN }}{%- endmacro -%}
+
+{%- macro _rates(summer) -%}
+  {%- set s = (now().month in SUMMER_MONTHS) if summer is none else summer -%}
+  {%- if PLAN == 'flat' -%}
+    {{- FLAT_SUMMER if s else FLAT_OTHER -}}
+  {%- else -%}
+    {{- (RATES_SUMMER if s else RATES_OTHER) | join(',') -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro tw_cost(kwh, summer=none) -%}
+  {%- set k = kwh | float(0) -%}
+  {%- set rates = _rates(summer).split(',') | map('float') | list -%}
+  {%- if PLAN == 'flat' -%}
+    {{- (k * rates[0]) | round(2) -}}
+  {%- else -%}
+    {%- set m = 2 if BIMONTHLY else 1 -%}
+    {%- set ns = namespace(cost=0, prev=0) -%}
+    {%- for i in range(rates | length) -%}
+      {%- set upper = [k, BOUNDS[i] * m] | min if i < BOUNDS | length else k -%}
+      {%- if upper > ns.prev -%}
+        {%- set ns.cost = ns.cost + (upper - ns.prev) * rates[i] -%}
+        {%- set ns.prev = upper -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {{- ns.cost | round(2) -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro tw_tier(kwh, summer=none) -%}
+  {%- set k = kwh | float(0) -%}
+  {%- set rates = _rates(summer).split(',') | map('float') | list -%}
+  {%- if PLAN == 'flat' -%}
+    {{- 1 }},{{ '%.2f' | format(rates[0]) -}}
+  {%- else -%}
+    {%- set m = 2 if BIMONTHLY else 1 -%}
+    {%- set ns = namespace(tier=rates | length) -%}
+    {%- for b in BOUNDS | reverse -%}
+      {%- if k <= b * m -%}{%- set ns.tier = BOUNDS | length - loop.index0 -%}{%- endif -%}
+    {%- endfor -%}
+    {{- ns.tier }},{{ '%.2f' | format(rates[ns.tier - 1]) -}}
+  {%- endif -%}
+{%- endmacro -%}

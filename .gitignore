@@ -1,0 +1,6 @@
+# Home Assistant 機敏 / 執行期資料
+secrets.yaml
+.storage/
+home-assistant_v2.db*
+*.log
+__pycache__/
