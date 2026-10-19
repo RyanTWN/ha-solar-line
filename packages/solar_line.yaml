@@ -9,7 +9,7 @@
 #   1. 從 configuration.yaml 移除舊的 rest_command.line_push（否則 key 重複會報錯）
 #   2. 從 automations.yaml 刪除舊的「每日日報」「逆變器離線警報」兩個自動化
 #   3. 在 secrets.yaml 加入 line_bearer / line_admin_user_id（見 secrets.example.yaml）
-#   4. 搜尋本檔 "TODO" 替換成你的實體名稱
+#   4. 實體已設定為泉海閑居的實際名稱（逆變器告警、ESP32 能量、notify.mobile_app_sm_s9180）
 #
 # 自建實體一律使用英文名稱，entity_id 才可預測（顯示名稱可在 UI 改成中文）。
 ###############################################################################
@@ -283,7 +283,7 @@ script:
             options: [normal, critical]
     variables:
       line_to: !secret line_admin_user_id
-      mobile_notify: notify.mobile_app_your_phone  # TODO: 換成你的 Companion App 通知服務
+      mobile_notify: notify.mobile_app_sm_s9180  # Companion App 通知服務
       line_reserve: 20  # 保留給緊急警報的 LINE 額度
       prio: "{{ priority | default('normal') }}"
       remaining: "{{ states('sensor.line_push_quota_remaining') | int(200) }}"
@@ -654,7 +654,8 @@ automation:
         entity_id: sensor.line_push_quota_remaining
         below: 21
     actions:
-      - action: notify.mobile_app_your_phone  # TODO: 同 solar_notify 的 mobile_notify
+      # 刻意不走 solar_notify：額度偏低時不能再消耗 LINE。服務名稱需與 solar_notify 的 mobile_notify 一致
+      - action: notify.mobile_app_sm_s9180
         data:
           title: "⚠️ LINE 推播額度偏低"
           message: >-

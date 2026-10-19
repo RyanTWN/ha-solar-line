@@ -17,7 +17,8 @@
 ## 架構規則（不要違反）
 
 - **方案 C**：LINE Webhook 只給 AstrBot；HA 只做 Push（`/v2/bot/message/push`），不要在 HA 加任何 Webhook 接收。
-- **所有推播一律走 `script.solar_notify`**（處理額度、備援、critical），不要在自動化裡直接呼叫 `rest_command.line_push` 或 `notify.*`。報表卡片走 `script.solar_send_report`。
+- **所有推播一律走 `script.solar_notify`**（處理額度、備援、critical），不要在自動化裡直接呼叫 `rest_command.line_push` 或 `notify.*`。報表卡片走 `script.solar_send_report`。唯一例外：`line_quota_low` 直接呼叫 App 通知（額度偏低時不能再用 LINE）。
+- 備援手機通知服務：`notify.mobile_app_sm_s9180`（`solar_notify` 的 `mobile_notify` 與 `line_quota_low` 兩處需一致）。
 - 免費方案每月 200 則 Push，`line_reserve: 20` 保留給 critical 警報。新增任何定期推播前先估算每月則數，並更新 README「推播額度估算」表。
 
 ## HA YAML 慣例
@@ -89,7 +90,6 @@
 - Commit 訊息格式：`feat: …` / `fix: …` / `docs: …`，中文描述。
 - 未經使用者要求不要建立 Pull Request、不要 force push。
 
-## 尚待使用者提供（YAML 中標 `TODO`）
+## 尚待使用者提供
 
-- `notify.mobile_app_your_phone` → Companion App 通知服務（2 處）
 - 契約種類與容量（瓩）→ 才能做「本期總電費（含基本電費）」

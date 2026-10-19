@@ -19,6 +19,7 @@
 | v2 | 改為單一 package；以下修正與 A–D 功能 |
 | v2.1 | E. 電費估算（農業灌溉電錶、低壓電力非時間電價、每月抄表） |
 | v2.2 | 逆變器狀態改用 `binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm`：區分「告警（on）」與「離線（unavailable）」，分別發送不同警報與恢復通知 |
+| v2.3 | 備援手機通知設定為 `notify.mobile_app_sm_s9180`，YAML 已無待填的 TODO |
 
 ### v2 / v2.1 變更明細
 
@@ -51,8 +52,9 @@ secrets.example.yaml       # secrets.yaml 需要新增的兩個 key
    - `configuration.yaml` 的 `rest_command: line_push:` 區塊
    - `automations.yaml`（或 UI）中舊的「每日日報」與「逆變器離線警報」
 4. `secrets.yaml` 加入 `line_bearer`、`line_admin_user_id`（見 `secrets.example.yaml`）。
-5. 搜尋 `TODO` 替換：
-   - `notify.mobile_app_your_phone` → 你的 Companion App 通知服務（2 處，開發者工具 → 動作 搜尋 `notify.mobile_app_` 即可看到）
+5. 確認實體名稱與你的 HA 一致（已預填泉海閑居的實際名稱）：
+   - 逆變器告警：`binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm`
+   - 備援手機通知：`notify.mobile_app_sm_s9180`
    - 計費期已設為每月 11 日歸零（每月 10–12 日抄表），一般不需再改
 6. 開發者工具 → YAML → 「檢查設定」→ 重新啟動。
 7. 到 **設定 → 輔助** 把 `Solar Weekly Report Enabled` 打開（若想收週報）。
