@@ -1,4 +1,4 @@
-# HA × AstrBot (LINE) 太陽能監控與日報 — 開發紀錄 v2.1
+# HA × AstrBot (LINE) 太陽能監控與日報 — 開發紀錄 v2.3
 
 泉海閑居太陽能系統：Home Assistant 監控 SunGery ESP32 逆變器資料，透過 LINE 推播日報 / 警報，並由 AstrBot 在 LINE 中回答查詢。
 
@@ -21,7 +21,7 @@
 | v2.2 | 逆變器狀態改用 `binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm`：區分「告警（on）」與「離線（unavailable）」，分別發送不同警報與恢復通知 |
 | v2.3 | 備援手機通知設定為 `notify.mobile_app_sm_s9180`，YAML 已無待填的 TODO |
 
-### v2 / v2.1 變更明細
+### v2 – v2.3 變更明細
 
 | 項目 | 內容 |
 | :--- | :--- |
@@ -31,6 +31,18 @@
 | C. 日落觸發 | 日落後 30 分鐘發日報 |
 | D. 週報 / 月報 | `utility_meter` 週、月累計，週一 / 每月 1 日 08:00 推播 Flex 卡片 |
 | E. 電費估算 | 泉海閑居農業灌溉電錶（每月抄表）；支援單一費率 / 累進兩種方案，計算本期流動電費與「省下電費」，日 / 週 / 月報皆顯示 |
+| F. 逆變器告警（v2.2） | 改用告警 binary_sensor：`on` 告警全天警報、`unavailable` 離線僅白天警報；恢復通知區分「告警已解除 / 已恢復連線」 |
+| G. 實體設定（v2.3） | 備援手機通知 `notify.mobile_app_sm_s9180`；YAML 已無待填 TODO |
+
+### 已確認的現場設定
+
+| 項目 | 值 | 確認日期 |
+| :--- | :--- | :--- |
+| 逆變器告警實體 | `binary_sensor.quan_hai_xian_ju_sungeryesp32_ni_bian_qi_gao_jing_inverter_alarm`，**`on` = 告警**、`off` = 正常、`unavailable` = ESP32 離線 | 2026-10-19 |
+| 備援手機通知 | `notify.mobile_app_sm_s9180` | 2026-10-19 |
+| 電錶 / 電價 | 農業灌溉電錶，台電低壓電力非時間電價：夏月 2.45、非夏月 2.35 元/度 | 2026-10-19 |
+| 抄表 | 每月 10–12 日（計費期以 11 日歸零近似） | 2026-10-19 |
+| 部署環境 | HA 與 AstrBot 在同一台主機（Docker） | 2026-10-19 |
 
 ## 檔案
 
@@ -38,6 +50,7 @@
 packages/solar_line.yaml   # 所有 HA 設定（rest_command / rest / template / utility_meter / script / automation）
 custom_templates/tw_power.jinja  # 電價方案、費率與計算 macro（電價調整只改這裡）
 secrets.example.yaml       # secrets.yaml 需要新增的兩個 key
+CLAUDE.md                  # 給 Claude Code 的專案規則與驗證流程
 ```
 
 ## 1. 安裝到 Home Assistant
@@ -174,6 +187,17 @@ SSE 版本把 `transport` 改成 `"sse"`、`url` 改成 `/mcp_server/sse`。啟�
 ## 5. 後續可再擴充
 
 ### 待辦（TODO）
+
+**部署與實測**（目前所有設定僅做過離線檢查：YAML 結構、模板 render、電價計算，尚未在真實 HA 上執行）
+
+- [ ] 依第 1 節安裝 package 與 `tw_power.jinja`，移除舊的 `rest_command.line_push` 與兩個舊自動化
+- [ ] 執行 `script.solar_send_report` 測試 Flex 卡片，確認 `sensor.line_push_quota_used` +1
+- [ ] 暫時將 `line_reserve` 改 `999`，確認改由 `notify.mobile_app_sm_s9180` 收到通知（測完改回 `20`）
+- [ ] 以 `utility_meter.calibrate` 補登 10/11 起的 `sensor.solar_grid_billing` / `sensor.solar_load_billing` 度數
+- [ ] 觀察第一次日落日報、逆變器告警 / 離線與恢復通知是否正常
+- [ ] 依第 4 節設定 HA MCP Server 與 AstrBot，確認端點（`/api/mcp` 或 `/mcp_server/sse`）與 AstrBot 設定欄位，回報後修正文件
+
+**功能**
 
 - [ ] **本期總電費估算（含基本電費）**：需先從電費單確認以下資料
   - 契約種類：裝置契約 / 需量契約（經常契約、非夏月契約）
